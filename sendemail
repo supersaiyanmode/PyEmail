@@ -1,0 +1,159 @@
+#!/usr/bin/python
+
+import os
+import os.path
+import itertools
+import smtplib
+import mimetypes
+import sys
+import argparse
+import cgi
+from email.mime.image import MIMEImage
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from smtplib import SMTP
+from email.MIMEText import MIMEText
+from email.MIMEMultipart import MIMEMultipart
+from email.MIMEBase import MIMEBase
+from email import Encoders
+from email.mime.text import MIMEText
+
+
+def prepareHTMLTemplate(args):
+	e = lambda x: cgi.escape(unicode(x)).encode('ascii', 'xmlcharrefreplace')
+	
+	tableStyle = "width:100%;border:1px solid #000;"
+	headerStyle = "background-color:#000;color:white;width:50%;"
+	fieldCellStyle = "background-color:#eee;color:black;padding:5px;"
+	valueCellStyle = "background-color:#fff;color:black;padding:5px;"
+	
+	rows = ""
+	for key, value in args.items():
+		rows += "<tr>"
+		rows += "<td style='{fieldCellStyle}'>{key}</td>".format(**locals())
+		rows += "<td style='{valueCellStyle}'>{value}</td>".format(**locals())
+		rows += "\n"
+
+	
+	return """
+	<html>
+		<head>
+		</head>
+		<body>
+		<table style="{tableStyle} {headerStyle}">
+		<tr>
+		<th>Field</th><th>Value</th>
+		</tr>
+		{rows}
+		</table>
+		</body>
+	</html>
+	""".format(**locals())
+
+def attachments(fileList):
+	attachments_list = []
+	for path in fileList:
+		if not os.path.isfile(path):
+			continue
+		ctype, encoding = mimetypes.guess_type(path)
+		if ctype is None or encoding is not None:
+			ctype = 'application/octet-stream'
+		maintype, subtype = ctype.split('/', 1)
+		if maintype == 'text':
+			with open(path) as fp:
+				msg = MIMEText(fp.read(), _subtype=subtype)
+		elif maintype == 'image':
+			with open(path, 'rb') as fp:
+				msg = MIMEImage(fp.read(), _subtype=subtype)
+		else:
+			with open(path, 'rb') as fp:
+				msg = MIMEBase(maintype, subtype)
+				msg.set_payload(fp.read())
+		msg.add_header('Content-Disposition', 'attachment',
+			filename=os.path.basename(path))
+		attachments_list.append(msg)
+	return attachments_list
+
+def sendEmail(cred, body=None, emails=None, attach=None, subject=None,bodyType="text"):
+	emails = list(emails)
+	attach = attach if attach is not None else []
+	subject = subject if subject is not None else "Updates"
+	
+	username, pwd = cred
+
+	msg = MIMEMultipart()
+	msg['Subject'] =  subject or "Updates"
+	msg['From'] = username
+	msg['To'] = ', '.join(emails)
+
+
+	if body != None:
+		part1 = MIMEText(body, bodyType)
+		msg.attach(part1)
+
+	for attachment in attachments(attach):
+		msg.attach(attachment)
+	try:
+		conn = SMTP('smtp.gmail.com',587)
+		conn.ehlo()
+		conn.starttls()
+		conn.ehlo()
+		conn.login(username,pwd)
+		conn.sendmail(username, emails, msg.as_string())
+	except Exception, e:
+		print>>sys.stderr,"Error sending email.", e
+		return (False, "Email not sent.")
+	finally:
+		conn.close()
+	return (True,"Email Sent!")
+
+def getArgParser():
+	class StoreNameValuePair(argparse.Action):
+		def __call__(self, parser, namespace, values, option_string=None):
+			if not hasattr(namespace, "custom"):
+				setattr(namespace, "custom", {})
+			
+			k, v = values[0].split('=', 1)
+			namespace.custom[k] = v;
+			
+	parser = argparse.ArgumentParser()
+	group = parser.add_mutually_exclusive_group()
+	group.add_argument("-r", "--raw", help="Sends a raw text as email.")
+	group.add_argument("-k", "--keyvalue", action=StoreNameValuePair, nargs='+',
+		help="Add Key/Value Pair.")
+	parser.add_argument("-a", "--attach", help="Add attachment.", nargs='+',
+		action='append', default=[])
+	parser.add_argument("-t", "--to", help="Destination Email.", nargs="+",
+		action='append', default=[["supersaiyanmode.rox@gmail.com"]])
+	parser.add_argument("-s", "--subject", help="Subject of email.",
+		default="Python Email")
+	obj = parser.parse_args()
+	if not hasattr(obj, "custom"):
+		obj.custom = None
+	return obj
+	
+def main():
+	cred = [x.strip() for x in open(os.path.expanduser("~/.sendemail.config"))]
+	args = getArgParser()
+	
+	body = None
+	mime = "plain"
+	if args.raw:
+		body = sys.stdin.read() if args.raw == "-" else args.raw
+	elif args.custom:
+		body = prepareHTMLTemplate(args.custom)
+		mime = "html"
+
+	params = {
+		"attach": itertools.chain(*args.attach),
+		"subject": args.subject,
+		"bodyType":mime,
+		"emails": itertools.chain(*args.to)
+	}
+	res = sendEmail(cred, body, **params)
+	print res[1]
+	sys.exit(0 if res[0] else 1)
+
+if __name__ == "__main__":
+	main()
+
